@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Voz99</string>
+    <string name="accessibility_explanation">Quando você solicitar, procura o código de embarque na tela da 99 e tenta realçá-lo. Não lê telas de outros aplicativos nem registra o código.</string>
+</resources>
