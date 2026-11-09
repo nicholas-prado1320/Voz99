@@ -72,29 +72,83 @@ class AndroidSpeech(private val context: Context) {
     }
 }
 
+/**
+ * Fala com confirmação do fim REAL da reprodução (não só o agendamento do TTS).
+ * Quando uma ação Android depender da resposta falada, use onFinished.
+ * A callback roda sempre na thread principal.
+ */
 class AndroidVoiceOutput(context: Context) : TextToSpeech.OnInitListener {
-    private var ready = false
-    var onDone: () -> Unit = {}
     private val handler = Handler(Looper.getMainLooper())
+    private var ready = false
+    private var initialized = false
+    private var closed = false
+    private var currentId: String? = null
+    private var currentCompletion: ((Boolean) -> Unit)? = null
+    private var pendingRequest: Pair<String, ((Boolean) -> Unit)?>? = null
+    var onDone: () -> Unit = {}
     private val engine = TextToSpeech(context.applicationContext, this)
 
     override fun onInit(status: Int) {
+        if (closed) return
+        initialized = true
         if (status == TextToSpeech.SUCCESS) {
             ready = engine.setLanguage(Locale("pt", "BR")) >= 0
-            engine.setSpeechRate(0.90f)
-            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) = Unit
-                override fun onDone(utteranceId: String?) { handler.post { onDone() } }
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) { handler.post { onDone() } }
-            })
+            if (ready) {
+                engine.setSpeechRate(0.90f)
+                engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) = Unit
+                    override fun onDone(utteranceId: String?) { finish(utteranceId, true) }
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) { finish(utteranceId, false) }
+                    override fun onError(utteranceId: String?, errorCode: Int) { finish(utteranceId, false) }
+                    override fun onStop(utteranceId: String?, interrupted: Boolean) { finish(utteranceId, false) }
+                })
+            }
+        }
+        val next = pendingRequest
+        pendingRequest = null
+        if (next != null) say(next.first, next.second)
+    }
+
+    private fun finish(id: String?, success: Boolean) {
+        handler.post {
+            if (id == null || id != currentId || closed) return@post
+            currentId = null
+            val callback = currentCompletion
+            currentCompletion = null
+            if (callback != null) callback(success)
+            else if (success) onDone()
         }
     }
 
-    fun say(value: String) {
-        if (ready) engine.speak(value.take(550), TextToSpeech.QUEUE_FLUSH, null, "voz99-${System.nanoTime()}")
+    fun say(value: String, onFinished: ((Boolean) -> Unit)? = null) {
+        if (closed) return
+        if (!initialized) {
+            pendingRequest = value to onFinished
+            return
+        }
+        if (!ready) {
+            onFinished?.invoke(false)
+            return
+        }
+        // QUEUE_FLUSH substitui a fala anterior. Callbacks antigas não abrirão a 99.
+        currentId = "voz99-${System.nanoTime()}"
+        currentCompletion = onFinished
+        val result = engine.speak(value.take(550), TextToSpeech.QUEUE_FLUSH, null, currentId)
+        if (result == TextToSpeech.ERROR) finish(currentId, false)
     }
 
-    fun stop() { if (ready) engine.stop() }
-    fun shutdown() { engine.stop(); engine.shutdown() }
+    fun stop() {
+        // Invalida explicitamente qualquer ação vinculada à fala que foi interrompida.
+        pendingRequest = null
+        currentId = null
+        currentCompletion = null
+        if (ready) engine.stop()
+    }
+
+    fun shutdown() {
+        closed = true
+        stop()
+        engine.shutdown()
+    }
 }
